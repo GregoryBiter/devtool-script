@@ -273,7 +273,10 @@ execute_command() {
     shift 2 || true
 
     local script_file
-    script_file=$(resolve_script_path "$category" "$command_name")
+    # `resolve_script_path` returns 1 when no matching file exists.  Keep that
+    # expected lookup failure out of `set -e` so we can show the useful error
+    # below instead of silently terminating the launcher.
+    script_file=$(resolve_script_path "$category" "$command_name") || script_file=""
 
     if [[ -z "$script_file" ]] || [[ ! -f "$script_file" ]]; then
         log_error "Команда не найдена: $category $command_name"

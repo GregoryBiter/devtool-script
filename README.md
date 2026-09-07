@@ -141,6 +141,7 @@ dev list
 
 | Команда | Опасность | Что делает под капотом |
 | :--- | :---: | :--- |
+| **`dev git sync-hosting`** | **ДА** | **Синхронизация файлов с хостинга**: привязывает локальную папку хостинга к Git-репозиторию, сводит изменения и находит добавленные/удаленные файлы без потери данных |
 | **`dev git purge-branches`** | **ДА** | Синхронизирует `git fetch -p`, находит и удаляет локальные ветки со статусом `[gone]` на сервере или смердженные в `main` |
 | **`dev git find-large [N]`** | Нет | Сканирует всю историю Git (`rev-list + cat-file + sort`), находя топ-$N$ самых тяжелых файлов и блобов |
 | **`dev git squash [count]`** | **ДА** | Объединяет последние N коммитов в один с сохранением изменений в staging (`git reset --soft HEAD~N`) |
@@ -169,9 +170,9 @@ dev list
 
 ```bash
 #!/usr/bin/env bash
-# @name Git Purge Dead Branches
-# @description Очистить локальные ветки со статусом gone на сервере
-# @usage dev git purge-branches [--force]
+# @name Git Sync Hosting Files
+# @description Привязать локальную папку с хостинга к Git без потери файлов
+# @usage dev git sync-hosting [remote_url] [branch=main]
 # @dangerous true
 
 set -e
@@ -188,6 +189,7 @@ devtool-script/
 │   └── utils.sh             # Движок метаданных, цвета, подтверждения, поиск
 ├── scripts/                 # Базовое хранилище сложных сценариев
 │   ├── git/                 # Сложные сценарии Git
+│   │   ├── sync-hosting.sh  # Безопасная синхронизация файлов с хостинга с Git
 │   │   ├── purge-branches.sh
 │   │   ├── find-large.sh
 │   │   ├── squash.sh

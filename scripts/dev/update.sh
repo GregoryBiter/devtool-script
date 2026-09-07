@@ -18,16 +18,28 @@ if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+OLD_HASH=$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-echo "--> git fetch origin..."
-git -C "$REPO_DIR" fetch origin
+echo "--> git fetch origin $BRANCH..."
+git -C "$REPO_DIR" fetch origin "$BRANCH" --prune
 
-echo "--> git pull --ff-only origin $BRANCH..."
-git -C "$REPO_DIR" pull --ff-only origin "$BRANCH"
+REMOTE_HASH=$(git -C "$REPO_DIR" rev-parse --short "origin/$BRANCH" 2>/dev/null || echo "unknown")
 
-echo "--> Обновление прав на исполнение..."
+if [[ "$OLD_HASH" == "$REMOTE_HASH" ]]; then
+    echo "✔ У вас уже установлена самая актуальная версия ($OLD_HASH)."
+else
+    echo "--> Применение обновлений ($OLD_HASH -> $REMOTE_HASH)..."
+    git -C "$REPO_DIR" pull --ff-only origin "$BRANCH"
+    echo
+    echo "Новые изменения:"
+    git -C "$REPO_DIR" log --oneline "${OLD_HASH}..${REMOTE_HASH}" || true
+    echo
+fi
+
+echo "--> Проверка прав на исполнение..."
 chmod +x "$REPO_DIR/bin/dev" "$REPO_DIR/lib/utils.sh"
 find "$REPO_DIR/scripts" -type f -name "*.sh" -exec chmod +x {} +
+chmod +x "$REPO_DIR/install.sh" "$REPO_DIR/uninstall.sh" 2>/dev/null || true
 
 echo
-echo "✔ DevTool успешно обновлен до актуальной версии!"
+echo "✔ DevTool готов к работе (версия: $(git -C "$REPO_DIR" rev-parse --short HEAD))."

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall.sh - Скрипт удаления символических ссылок DevTool CLI
+# uninstall.sh - Скрипт удаления DevTool CLI и символических ссылок
 
 set -e
 
@@ -20,6 +20,19 @@ for path in "/usr/local/bin/dev" "$HOME/.local/bin/dev"; do
         fi
     fi
 done
+
+if [[ -d "$HOME/.devtools" ]]; then
+    if [[ "${1:-}" == "--purge" ]] || [[ "${1:-}" == "-f" ]]; then
+        rm -rf "$HOME/.devtools"
+        echo "✔ Каталог $HOME/.devtools удален."
+    elif [[ -t 0 ]]; then
+        read -r -p "Удалить каталог репозитория $HOME/.devtools? [y/N]: " del_repo
+        if [[ "$del_repo" =~ ^[yYдД] ]]; then
+            rm -rf "$HOME/.devtools"
+            echo "✔ Каталог $HOME/.devtools удален."
+        fi
+    fi
+fi
 
 if [[ $REMOVED -eq 0 ]]; then
     echo "ℹ Символические ссылки dev не найдены в стандартных путях."

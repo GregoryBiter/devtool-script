@@ -132,32 +132,31 @@ dev -y docker clean
 
 ## 📦 Базовые команды "из коробки"
 
+В наборе оставлены **только сложные и многосоставные операции**, цепочки команд которых неудобно или тяжело держать в голове:
+
 Посмотреть актуальную таблицу всех команд в терминале:
 ```bash
 dev list
 ```
 
-| Команда | Опасность | Описание |
+| Команда | Опасность | Что делает под капотом |
 | :--- | :---: | :--- |
-| **`dev git sync [branch]`** | Нет | Забирает `origin` с `prune` и делает `git pull --ff-only` |
-| **`dev git clean [-x]`** | **ДА** | Очищает неотслеживаемые файлы (`git clean -fd`) |
-| **`dev git reset-main`** | **ДА** | Жестко сбрасывает текущую `main` (или `master`) на `origin/main` |
-| **`dev git squash [count]`** | **ДА** | Объединяет последние N коммитов в staging (`git reset --soft HEAD~N`) |
-| **`dev git log [count]`** | Нет | Красивое цветное дерево последних коммитов |
-| **`dev docker clean [--all]`** | **ДА** | Удаляет неиспользуемые контейнеры, сети и образы (`docker system prune`) |
-| **`dev docker rebuild [svc]`** | Нет | Пересобирает и перезапускает сервисы без кэша (`compose build --no-cache`) |
-| **`dev docker ps`** | Нет | Статус контейнеров, маппинг портов и статистика RAM/CPU |
-| **`dev docker stop-all`** | **ДА** | Мягко останавливает все запущенные Docker-контейнеры |
-| **`dev laravel reset`** | **ДА** | Полный сброс БД и кэшей (`migrate:fresh --seed`, `optimize:clear`) |
-| **`dev laravel cache-clear`** | Нет | Очистка всех кэшей конфигурации, роутов и вьюшек |
-| **`dev laravel migrate`** | Нет | Выполнение ожидающих миграций базы данных |
-| **`dev laravel tinker`** | Нет | Интерактивная консоль Laravel Tinker |
-| **`dev server deploy [branch]`** | **ДА** | Пошаговый сценарий деплоя (Git pull, Composer, NPM build, миграции) |
-| **`dev server permissions`** | **ДА** | Установка безопасных прав (каталоги 755, файлы 644, storage 775) |
-| **`dev server health`** | Нет | Мониторинг RAM, дисков, нагрузки CPU и слушающих портов |
-| **`dev update`** | Нет | Обновление devtool-script из Git |
-| **`dev doctor`** | Нет | Проверка установленных утилит (bash, git, docker, php, node, fzf) |
-| **`dev dev create`** | Нет | Интерактивный генератор шаблона нового скрипта |
+| **`dev git purge-branches`** | **ДА** | Синхронизирует `git fetch -p`, находит и удаляет локальные ветки со статусом `[gone]` на сервере или смердженные в `main` |
+| **`dev git find-large [N]`** | Нет | Сканирует всю историю Git (`rev-list + cat-file + sort`), находя топ-$N$ самых тяжелых файлов и блобов |
+| **`dev git squash [count]`** | **ДА** | Объединяет последние N коммитов в один с сохранением изменений в staging (`git reset --soft HEAD~N`) |
+| **`dev git undo`** | **ДА** | Интерактивный откат коммитов с выбором режима: soft (в staging), mixed (на диск), hard или поиск в `reflog` |
+| **`dev docker nuke`** | **ДА** | Глубокая очистка Docker: остановка всех контейнеров, удаление orphaned-сетей, образов, томов и кэша BuildKit |
+| **`dev docker db-dump [c]`** | Нет | Автоопределение СУБД (MySQL / Postgres / MariaDB) и выгрузка дампа из контейнера в сжатый `.sql.gz` на хосте |
+| **`dev docker rebuild [s]`** | Нет | Чистая пересборка Compose: down с удалением orphan-контейнеров, build `--no-cache`, запуск и проверка статуса |
+| **`dev laravel reset`** | **ДА** | 8 шагов: down, composer dump-autoload, очистка кэшей и `bootstrap/cache`, `migrate:fresh --seed`, `storage:link`, права 775, up |
+| **`dev server kill-port <p>`** | **ДА** | Поиск процесса, занявшего порт (`lsof`/`fuser`/`ss`), вывод PID, владельца, RAM и принудительное завершение |
+| **`dev server disk-usage [p]`**| Нет | Поиск 15 самых тяжелых каталогов и файлов на диске (`du -ahx`) без зависания на системных псевдо-ФС |
+| **`dev server ssl-check <dom>`**| Нет | Проверка SSL через OpenSSL: точные оставшиеся дни, дата истечения, эмитент и SAN без браузера |
+| **`dev server permissions`** | **ДА** | Безопасные права веб-сервера: 755 директории, 644 файлы, 775 для `storage/cache` и защита `+x` на скриптах |
+| **`dev server deploy [branch]`**| **ДА** | Пошаговый деплой: Git pull, Composer no-dev optimize, npm ci/build, миграции, кэш, перезапуск воркеров |
+| **`dev update`** | Нет | Автообновление devtool через Git (`pull --ff-only`, вывод списка новых коммитов и обновление прав) |
+| **`dev doctor`** | Нет | Проверка системных утилит (Bash 4+, Git, Docker, PHP, Composer, Node, NPM, fzf) |
+| **`dev dev create <cat> <name>`**| Нет | Интерактивный генератор шаблона нового сценария с декларативными метаданными |
 
 ---
 
@@ -167,13 +166,13 @@ dev list
 
 ```bash
 #!/usr/bin/env bash
-# @name Git Sync
-# @description Синхронизировать текущую или указанную ветку с origin
-# @usage dev git sync [branch]
-# @dangerous false
+# @name Git Purge Dead Branches
+# @description Очистить локальные ветки со статусом gone на сервере
+# @usage dev git purge-branches [--force]
+# @dangerous true
 
 set -e
-# Логика вашего скрипта...
+# Логика сложного сценария...
 ```
 
 ### Структура репозитория
@@ -184,32 +183,29 @@ devtool-script/
 │   └── dev                  # Главный исполняемый CLI-лаунчер
 ├── lib/
 │   └── utils.sh             # Движок метаданных, цвета, подтверждения, поиск
-├── scripts/                 # Базовое хранилище ("база из коробки")
-│   ├── git/                 # Сценарии Git
-│   │   ├── sync.sh
-│   │   ├── clean.sh
-│   │   ├── reset-main.sh
+├── scripts/                 # Базовое хранилище сложных сценариев
+│   ├── git/                 # Сложные сценарии Git
+│   │   ├── purge-branches.sh
+│   │   ├── find-large.sh
 │   │   ├── squash.sh
-│   │   └── log.sh
-│   ├── docker/              # Сценарии Docker и Compose
-│   │   ├── clean.sh
-│   │   ├── rebuild.sh
-│   │   ├── ps.sh
-│   │   └── stop-all.sh
-│   ├── laravel/             # Сценарии для Laravel / PHP (с поддержкой Sail)
-│   │   ├── reset.sh
-│   │   ├── cache-clear.sh
-│   │   ├── migrate.sh
-│   │   └── tinker.sh
+│   │   └── undo.sh
+│   ├── docker/              # Комплексные сценарии Docker
+│   │   ├── nuke.sh
+│   │   ├── db-dump.sh
+│   │   └── rebuild.sh
+│   ├── laravel/             # Комплексные сценарии Laravel
+│   │   └── reset.sh         # Полный 8-шаговый hard reset
 │   ├── server/              # Серверные утилиты и DevOps
-│   │   ├── deploy.sh
+│   │   ├── kill-port.sh
+│   │   ├── disk-usage.sh
+│   │   ├── ssl-check.sh
 │   │   ├── permissions.sh
-│   │   └── health.sh
+│   │   └── deploy.sh
 │   └── dev/                 # Служебные утилиты devtool
-│       ├── update.sh        # Обновление лаунчера через git pull
-│       ├── doctor.sh        # Проверка окружения и утилит
-│       └── create.sh        # Генератор новых скриптов
-├── install.sh               # Скрипт быстрой установки
+│       ├── update.sh
+│       ├── doctor.sh
+│       └── create.sh
+├── install.sh               # Скрипт быстрой установки (curl & локально)
 ├── uninstall.sh             # Скрипт удаления
 └── README.md
 ```

@@ -161,8 +161,6 @@ get_script_search_dirs() {
         dirs+=("$DEV_EXTRA_SCRIPTS")
     elif [[ -d "$HOME/.config/devtool/scripts" ]]; then
         dirs+=("$HOME/.config/devtool/scripts")
-    elif [[ -d "$HOME/.devtools/scripts" ]]; then
-        dirs+=("$HOME/.devtools/scripts")
     fi
 
     # 3. Базовое хранилище (встроенные скрипты)

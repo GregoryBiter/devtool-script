@@ -1,0 +1,13 @@
+# Local overrides & environments
+.env
+.env.local
+*.local
+
+# Temporary files & logs
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Local project-specific scripts override (optional cache)
+.cache/

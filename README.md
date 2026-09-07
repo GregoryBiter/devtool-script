@@ -148,6 +148,9 @@ dev list
 | **`dev docker nuke`** | **ДА** | Глубокая очистка Docker: остановка всех контейнеров, удаление orphaned-сетей, образов, томов и кэша BuildKit |
 | **`dev docker db-dump [c]`** | Нет | Автоопределение СУБД (MySQL / Postgres / MariaDB) и выгрузка дампа из контейнера в сжатый `.sql.gz` на хосте |
 | **`dev docker rebuild [s]`** | Нет | Чистая пересборка Compose: down с удалением orphan-контейнеров, build `--no-cache`, запуск и проверка статуса |
+| **`dev laravel sail-setup`** | **ДА** | **Полный старт проекта через Sail с нуля**: ставит Composer в Docker без хост-PHP, `.env`, `sail up`, `key:generate`, `sail npm install/build`, миграции |
+| **`dev laravel sail-install`**| Нет | Установка Composer-зависимостей через изолированный временный Docker-контейнер, если на хосте нет PHP |
+| **`dev laravel sail-npm [...]`**| Нет | Выполнение команд NPM (`install`, `build`, `run dev`) внутри контейнера Laravel Sail |
 | **`dev laravel reset`** | **ДА** | 8 шагов: down, composer dump-autoload, очистка кэшей и `bootstrap/cache`, `migrate:fresh --seed`, `storage:link`, права 775, up |
 | **`dev server kill-port <p>`** | **ДА** | Поиск процесса, занявшего порт (`lsof`/`fuser`/`ss`), вывод PID, владельца, RAM и принудительное завершение |
 | **`dev server disk-usage [p]`**| Нет | Поиск 15 самых тяжелых каталогов и файлов на диске (`du -ahx`) без зависания на системных псевдо-ФС |
@@ -193,7 +196,10 @@ devtool-script/
 │   │   ├── nuke.sh
 │   │   ├── db-dump.sh
 │   │   └── rebuild.sh
-│   ├── laravel/             # Комплексные сценарии Laravel
+│   ├── laravel/             # Комплексные сценарии Laravel и Sail
+│   │   ├── sail-setup.sh    # Полный запуск проекта с нуля (Composer в Docker + Sail + NPM)
+│   │   ├── sail-install.sh  # Установка Composer через Docker без PHP на хосте
+│   │   ├── sail-npm.sh      # Запуск NPM команд внутри контейнера Sail
 │   │   └── reset.sh         # Полный 8-шаговый hard reset
 │   ├── server/              # Серверные утилиты и DevOps
 │   │   ├── kill-port.sh

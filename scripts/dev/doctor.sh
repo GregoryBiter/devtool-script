@@ -51,9 +51,17 @@ else
     echo -e "  \033[1;31m✖\033[0m Базовые скрипты не найдены в $REPO_DIR/scripts"
 fi
 
+USER_SCRIPTS_DIR="${DEV_USER_SCRIPTS_DIR:-$HOME/.dev-tools-scripts}"
+if [[ -d "$USER_SCRIPTS_DIR" ]]; then
+    U_TOTAL=$(find "$USER_SCRIPTS_DIR" -mindepth 1 \( -name '.*' -prune -o -type f -name "*.sh" -print \) 2>/dev/null | wc -l)
+    echo -e "  \033[1;32m✔\033[0m Пользовательские скрипты: $USER_SCRIPTS_DIR (найдено: $U_TOTAL)"
+else
+    echo -e "  \033[1;33mℹ\033[0m Пользовательские скрипты: $USER_SCRIPTS_DIR (каталог готов к созданию скриптов)"
+fi
+
 if [[ -d "$HOME/.config/devtool/scripts" ]]; then
-    U_TOTAL=$(find "$HOME/.config/devtool/scripts" -type f -name "*.sh" 2>/dev/null | wc -l)
-    echo -e "  \033[1;32m✔\033[0m Пользовательские скрипты: ~/.config/devtool/scripts (найдено: $U_TOTAL)"
+    C_TOTAL=$(find "$HOME/.config/devtool/scripts" -mindepth 1 \( -name '.*' -prune -o -type f -name "*.sh" -print \) 2>/dev/null | wc -l)
+    echo -e "  \033[1;32m✔\033[0m Пользовательские скрипты: ~/.config/devtool/scripts (найдено: $C_TOTAL)"
 fi
 
 if [[ -d "$PWD/.dev/scripts" ]] || [[ -d "$PWD/.dev" ]]; then

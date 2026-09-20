@@ -29,7 +29,18 @@ fi
 NAME=$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
 CATEGORY=$(echo "$CATEGORY" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
 
-TARGET_DIR="$REPO_DIR/scripts/$CATEGORY"
+USER_SCRIPTS_DIR="${DEV_USER_SCRIPTS_DIR:-$HOME/.dev-tools-scripts}"
+
+# Определение целевого каталога (пользовательский ~/.dev-tools-scripts или базовый repo)
+if [[ "${3:-}" == "--base" ]] || [[ "${3:-}" == "--system" ]] || [[ "${1:-}" == "--base" ]] || [[ "${1:-}" == "--system" ]]; then
+    TARGET_BASE="$REPO_DIR/scripts"
+elif [[ "$PWD" == "$REPO_DIR" ]] && [[ "$REPO_DIR" != "$HOME/.devtools" ]]; then
+    TARGET_BASE="$REPO_DIR/scripts"
+else
+    TARGET_BASE="$USER_SCRIPTS_DIR"
+fi
+
+TARGET_DIR="$TARGET_BASE/$CATEGORY"
 TARGET_FILE="$TARGET_DIR/$NAME.sh"
 
 if [[ -f "$TARGET_FILE" ]]; then

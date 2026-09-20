@@ -144,7 +144,7 @@ confirm_if_dangerous() {
 # --- Поиск каталогов скриптов ---
 # Приоритет:
 # 1. Проектные скрипты: $PWD/.dev/scripts или $PWD/.dev
-# 2. Пользовательские скрипты: ~/.config/devtool/scripts или ~/.devtools/scripts
+# 2. Персональные пользовательские скрипты: $DEV_EXTRA_SCRIPTS, ~/.dev-tools-scripts, ~/.config/devtool/scripts
 # 3. Базовая библиотека репозитория: $DEV_ROOT_DIR/scripts
 get_script_search_dirs() {
     local dirs=()
@@ -159,7 +159,18 @@ get_script_search_dirs() {
     # 2. Персональные пользовательские скрипты
     if [[ -n "${DEV_EXTRA_SCRIPTS:-}" ]] && [[ -d "$DEV_EXTRA_SCRIPTS" ]]; then
         dirs+=("$DEV_EXTRA_SCRIPTS")
-    elif [[ -d "$HOME/.config/devtool/scripts" ]]; then
+    fi
+
+    # Пользовательская директория в домашней папке (~/.dev-tools-scripts)
+    local user_scripts_dir="${DEV_USER_SCRIPTS_DIR:-$HOME/.dev-tools-scripts}"
+    if [[ -d "$user_scripts_dir" ]]; then
+        dirs+=("$user_scripts_dir")
+        if [[ -d "$user_scripts_dir/scripts" ]]; then
+            dirs+=("$user_scripts_dir/scripts")
+        fi
+    fi
+
+    if [[ -d "$HOME/.config/devtool/scripts" ]]; then
         dirs+=("$HOME/.config/devtool/scripts")
     fi
 
@@ -181,18 +192,39 @@ resolve_script_path() {
 
     for dir in "${search_dirs[@]}"; do
         # 1. Полноценная категория/команда.sh
-        if [[ -f "$dir/$category/$command_name.sh" ]]; then
+        if [[ -n "$category" ]] && [[ -n "$command_name" ]] && [[ -f "$dir/$category/$command_name.sh" ]]; then
             echo "$dir/$category/$command_name.sh"
             return 0
         fi
-        # 2. Без расширения .sh
-        if [[ -f "$dir/$category/$command_name" ]] && [[ -x "$dir/$category/$command_name" ]]; then
+        # 2. Без расширения .sh внутри категории
+        if [[ -n "$category" ]] && [[ -n "$command_name" ]] && [[ -f "$dir/$category/$command_name" ]] && [[ -x "$dir/$category/$command_name" ]]; then
             echo "$dir/$category/$command_name"
             return 0
         fi
-        # 3. Если category пустой, прямой поиск в корне каталога
+        # 3. Прямой поиск в корне каталога (dir/command_name.sh), если category == "general" или category пустой
+        if [[ "$category" == "general" || -z "$category" ]] && [[ -n "$command_name" ]]; then
+            if [[ -f "$dir/$command_name.sh" ]]; then
+                echo "$dir/$command_name.sh"
+                return 0
+            fi
+            if [[ -f "$dir/$command_name" ]] && [[ -x "$dir/$command_name" ]]; then
+                echo "$dir/$command_name"
+                return 0
+            fi
+        fi
+        # 4. Если command_name пустой, прямой поиск в корне каталога (dir/category.sh)
         if [[ -z "$command_name" ]] && [[ -f "$dir/$category.sh" ]]; then
             echo "$dir/$category.sh"
+            return 0
+        fi
+        # 5. Если вызван как "dev mycmd", и category="mycmd", проверяем dir/mycmd.sh
+        if [[ -n "$category" ]] && [[ -z "$command_name" || "$command_name" == "$category" ]] && [[ -f "$dir/$category.sh" ]]; then
+            echo "$dir/$category.sh"
+            return 0
+        fi
+        # 6. Если передан category и command_name, но скрипт лежит в корне как dir/command_name.sh
+        if [[ -n "$command_name" ]] && [[ -f "$dir/$command_name.sh" ]]; then
+            echo "$dir/$command_name.sh"
             return 0
         fi
     done
@@ -216,7 +248,12 @@ get_all_categories() {
                     [[ "$cat_name" =~ ^\. ]] && continue
                     categories+=("$cat_name")
                 fi
-            done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d)
+            done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null)
+
+            # Если в корне каталога есть скрипты .sh, добавляем категорию general
+            if find "$dir" -maxdepth 1 -type f -name "*.sh" ! -name '.*' 2>/dev/null | grep -q .; then
+                categories+=("general")
+            fi
         fi
     done
 
@@ -235,6 +272,7 @@ get_all_scripts() {
         [[ ! -d "$dir" ]] && continue
 
         while IFS= read -r script_file; do
+            [[ -z "$script_file" ]] && continue
             local rel_path="${script_file#$dir/}"
             local cat
             local cmd
@@ -247,6 +285,10 @@ get_all_scripts() {
                 cmd=$(basename "$rel_path" .sh)
             fi
 
+            # Пропускаем скрытые файлы или каталоги
+            [[ "$cat" =~ (^|/)\. ]] && continue
+            [[ "$cmd" =~ ^\. ]] && continue
+
             # Если задан фильтр по категории
             if [[ -n "$filter_category" ]] && [[ "$cat" != "$filter_category" ]]; then
                 continue
@@ -257,6 +299,6 @@ get_all_scripts() {
                 seen_scripts[$key]=1
                 echo "${cat}:${cmd}:${script_file}"
             fi
-        done < <(find "$dir" -type f -name "*.sh" | sort)
+        done < <(find "$dir" -mindepth 1 \( -name '.*' -prune -o -type f -name "*.sh" -print \) 2>/dev/null | sort)
     done
 }

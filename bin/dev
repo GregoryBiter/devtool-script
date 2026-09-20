@@ -13,15 +13,19 @@ done
 DEV_ROOT_DIR="$( cd -P "$( dirname "$SOURCE" )/.." >/dev/null 2>&1 && pwd )"
 export DEV_ROOT_DIR
 
+DEV_USER_SCRIPTS_DIR="${DEV_USER_SCRIPTS_DIR:-$HOME/.dev-tools-scripts}"
+export DEV_USER_SCRIPTS_DIR
+
 # Загрузка утилит
 # shellcheck source=lib/utils.sh
 source "$DEV_ROOT_DIR/lib/utils.sh"
 
-DEV_VERSION="1.0.0"
+DEV_VERSION="1.1.0"
 
 show_version() {
     echo "devtool CLI version $DEV_VERSION"
     echo "Root directory: $DEV_ROOT_DIR"
+    echo "User scripts:   $DEV_USER_SCRIPTS_DIR"
 }
 
 show_help() {
@@ -370,8 +374,10 @@ fi
 
 # 3. Формат "dev <category> <command>"
 if [[ -n "$ARG2" ]] && [[ ! "$ARG2" =~ ^- ]]; then
-    shift 2
-    execute_command "$ARG1" "$ARG2" "$@"
+    if resolve_script_path "$ARG1" "$ARG2" >/dev/null 2>&1; then
+        shift 2
+        execute_command "$ARG1" "$ARG2" "$@"
+    fi
 fi
 
 # 4. Формат "dev <command>" для системных утилит в scripts/dev/

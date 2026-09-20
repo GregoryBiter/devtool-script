@@ -171,7 +171,79 @@ if [[ "$TARGET_DIR" == "$HOME/.local/bin" ]]; then
     fi
 fi
 
-# 6. Проверка fzf
+# 6. Каталог персональных пользовательских скриптов и шаблон-пример
+USER_SCRIPTS_DIR="${DEV_USER_SCRIPTS_DIR:-$HOME/.dev-tools-scripts}"
+mkdir -p "$USER_SCRIPTS_DIR"
+
+if [[ ! -f "$USER_SCRIPTS_DIR/README.md" ]]; then
+    log_step "Подготовка каталога для пользовательских скриптов: ${C_CYAN}$USER_SCRIPTS_DIR${C_RESET}..."
+    cat << 'EOF' > "$USER_SCRIPTS_DIR/README.md"
+# 🛠 Персональные скрипты DevTool
+
+Каталог для добавления собственных скриптов для DevTool CLI (`dev`).
+
+## Быстрый старт:
+
+В каталоге `example/` находится готовый скрипт-пример:
+```bash
+dev example sample
+```
+
+## Как создать свой скрипт:
+
+1. **Скопировать пример**:
+   ```bash
+   mkdir -p ~/.dev-tools-scripts/mytools
+   cp ~/.dev-tools-scripts/example/sample.sh ~/.dev-tools-scripts/mytools/mycommand.sh
+   ```
+
+2. **Или использовать команду генератора**:
+   ```bash
+   dev dev create mytools mycommand
+   ```
+
+3. **Или создать вручную**:
+   Создайте `.sh` файл в подпапке категории или прямо в корне каталога и сделайте исполняемым (`chmod +x`).
+EOF
+    log_success "Каталог пользовательских скриптов создан: $USER_SCRIPTS_DIR"
+fi
+
+EXAMPLE_SCRIPT="$USER_SCRIPTS_DIR/example/sample.sh"
+if [[ ! -f "$EXAMPLE_SCRIPT" ]]; then
+    mkdir -p "$(dirname "$EXAMPLE_SCRIPT")"
+    cat << 'EOF' > "$EXAMPLE_SCRIPT"
+#!/usr/bin/env bash
+# @name Пример пользовательского скрипта
+# @description Шаблон для создания ваших собственных команд DevTool
+# @usage dev example sample [ваше_имя]
+# @dangerous false
+
+set -e
+
+# ==============================================================================
+# 💡 Как создать свой скрипт на основе этого шаблона:
+# 1. Скопируйте этот файл под новым именем или в другую категорию:
+#    cp ~/.dev-tools-scripts/example/sample.sh ~/.dev-tools-scripts/mytools/mycmd.sh
+# 2. Отредактируйте метаданные выше (@name, @description, @usage, @dangerous)
+# 3. Напишите вашу bash-логику ниже
+# 4. Скрипт сразу появится в 'dev list' и будет готов к запуску:
+#    dev mytools mycmd
+# ==============================================================================
+
+NAME="${1:-Разработчик}"
+
+echo "👋 Привет, $NAME!"
+echo "✔ Скрипт успешно выполнен из: ~/.dev-tools-scripts/example/sample.sh"
+echo
+echo "💡 Чтобы добавить собственную команду:"
+echo "   1) Скопируйте этот файл: cp ~/.dev-tools-scripts/example/sample.sh ~/.dev-tools-scripts/<категория>/<команда>.sh"
+echo "   2) Или используйте генератор: dev dev create <категория> <команда>"
+EOF
+    chmod +x "$EXAMPLE_SCRIPT"
+    log_success "Создан пример пользовательского скрипта: $EXAMPLE_SCRIPT"
+fi
+
+# 7. Проверка fzf
 echo
 if ! command -v fzf >/dev/null 2>&1; then
     echo -e "${C_YELLOW}💡 Рекомендация:${C_RESET}"

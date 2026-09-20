@@ -29,7 +29,10 @@ if [[ "$OLD_HASH" == "$REMOTE_HASH" ]]; then
     echo "✔ У вас уже установлена самая актуальная версия ($OLD_HASH)."
 else
     echo "--> Применение обновлений ($OLD_HASH -> $REMOTE_HASH)..."
-    git -C "$REPO_DIR" pull --ff-only origin "$BRANCH"
+    git -C "$REPO_DIR" pull --ff-only origin "$BRANCH" || {
+        echo "⚠ Не удалось выполнить fast-forward pull (локальные изменения). Синхронизация с origin/$BRANCH..."
+        git -C "$REPO_DIR" reset --hard "origin/$BRANCH"
+    }
     echo
     echo "Новые изменения:"
     git -C "$REPO_DIR" log --oneline "${OLD_HASH}..${REMOTE_HASH}" || true

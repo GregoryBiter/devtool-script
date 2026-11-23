@@ -1,42 +1,21 @@
 #!/usr/bin/env bash
-# uninstall.sh - Скрипт удаления DevTool CLI и символических ссылок
+# uninstall.sh — удалить ядро dev. Ваши скрипты (~/.dev-scripts) НЕ трогаются.
+#   ./uninstall.sh            удалить ссылки dev
+#   ./uninstall.sh --purge    + удалить ~/.devtools
 
-set -e
+set -euo pipefail
 
-echo "==> Удаление DevTool CLI..."
+INSTALL_DIR="${DEVTOOL_DIR:-$HOME/.devtools}"
 
-REMOVED=0
-
-for path in "/usr/local/bin/dev" "$HOME/.local/bin/dev"; do
-    if [[ -L "$path" ]] || [[ -f "$path" ]]; then
-        if [[ -w "$(dirname "$path")" ]] || [[ $EUID -eq 0 ]]; then
-            rm -f "$path"
-            echo "✔ Удалена ссылка: $path"
-            REMOVED=1
-        elif command -v sudo >/dev/null 2>&1; then
-            sudo rm -f "$path"
-            echo "✔ Удалена ссылка: $path (через sudo)"
-            REMOVED=1
-        fi
-    fi
+for link in "$HOME/.local/bin/dev" "/usr/local/bin/dev"; do
+    [[ -L "$link" ]] || continue
+    if [[ -w "$(dirname "$link")" ]]; then rm -f "$link"; else sudo rm -f "$link"; fi
+    echo "✔ Удалено: $link"
 done
 
-if [[ -d "$HOME/.devtools" ]]; then
-    if [[ "${1:-}" == "--purge" ]] || [[ "${1:-}" == "-f" ]]; then
-        rm -rf "$HOME/.devtools"
-        echo "✔ Каталог $HOME/.devtools удален."
-    elif [[ -t 0 ]]; then
-        read -r -p "Удалить каталог репозитория $HOME/.devtools? [y/N]: " del_repo
-        if [[ "$del_repo" =~ ^[yYдД] ]]; then
-            rm -rf "$HOME/.devtools"
-            echo "✔ Каталог $HOME/.devtools удален."
-        fi
-    fi
+if [[ "${1:-}" == "--purge" && -d "$INSTALL_DIR" ]]; then
+    rm -rf "$INSTALL_DIR"
+    echo "✔ Удалено: $INSTALL_DIR"
 fi
 
-if [[ $REMOVED -eq 0 ]]; then
-    echo "ℹ Символические ссылки dev не найдены в стандартных путях."
-else
-    echo
-    echo "✔ DevTool CLI успешно удален из системы."
-fi
+echo "ℹ Скрипты в ${DEV_SCRIPTS_HOME:-$HOME/.dev-scripts} оставлены как есть."

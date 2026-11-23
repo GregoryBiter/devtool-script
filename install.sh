@@ -1,266 +1,98 @@
 #!/usr/bin/env bash
-# install.sh - Универсальный скрипт автоматической установки и обновления DevTool CLI
-# Поддерживает как локальный запуск, так и однострочный запуск через curl:
+# install.sh — установка/обновление ядра dev.
+#
 #   curl -fsSL https://raw.githubusercontent.com/GregoryBiter/devtool-script/main/install.sh | bash
+#   curl -fsSL .../install.sh | bash -s -- --pack git@github.com:me/my-scripts.git
+#   ./install.sh                # из локальной копии репозитория
+#
+# Флаги:
+#   --pack <git-url>   сразу подключить пакет скриптов (можно несколько раз)
+#   --global           ссылка в /usr/local/bin вместо ~/.local/bin
 
-set -e
+set -euo pipefail
 
-# --- Цвета для вывода ---
-if [[ -t 1 ]] || [[ -n "${FORCE_COLOR:-}" ]]; then
-    C_RESET="\033[0m"
-    C_BOLD="\033[1m"
-    C_DIM="\033[2m"
-    C_RED="\033[31m"
-    C_GREEN="\033[32m"
-    C_YELLOW="\033[33m"
-    C_BLUE="\033[34m"
-    C_CYAN="\033[36m"
+REPO_URL="https://github.com/GregoryBiter/devtool-script.git"
+INSTALL_DIR="${DEVTOOL_DIR:-$HOME/.devtools}"
+SCRIPTS_HOME="${DEV_SCRIPTS_HOME:-$HOME/.dev-scripts}"
+
+ok()   { echo -e "\033[32m✔\033[0m $*"; }
+warn() { echo -e "\033[33m⚠\033[0m $*"; }
+die()  { echo -e "\033[31m✖\033[0m $*" >&2; exit 1; }
+
+PACKS=() GLOBAL=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --pack)      PACKS+=("${2:?нужен URL}"); shift 2 ;;
+        -g|--global) GLOBAL=1; shift ;;
+        *) die "Неизвестный аргумент: $1" ;;
+    esac
+done
+
+(( BASH_VERSINFO[0] >= 4 )) || die "Нужен Bash 4+ (у вас $BASH_VERSION). На macOS: brew install bash"
+command -v git >/dev/null 2>&1 || die "Нужен git."
+
+# 1. Ядро: локальная копия или клон в ~/.devtools
+HERE=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+if [[ -n "$HERE" && -f "$HERE/bin/dev" ]]; then
+    ROOT="$HERE"
+    ok "Ядро: локальная копия $ROOT"
+elif [[ -d "$INSTALL_DIR/.git" ]]; then
+    ROOT="$INSTALL_DIR"
+    git -C "$ROOT" pull --ff-only -q || warn "Не удалось обновить $ROOT (локальные изменения?)"
+    ok "Ядро обновлено: $ROOT"
 else
-    C_RESET=""
-    C_BOLD=""
-    C_DIM=""
-    C_RED=""
-    C_GREEN=""
-    C_YELLOW=""
-    C_BLUE=""
-    C_CYAN=""
+    [[ -e "$INSTALL_DIR" ]] && die "$INSTALL_DIR уже существует и это не git-репозиторий."
+    git clone -q "$REPO_URL" "$INSTALL_DIR"
+    ROOT="$INSTALL_DIR"
+    ok "Ядро установлено: $ROOT"
 fi
+chmod +x "$ROOT/bin/dev"
 
-log_info()    { echo -e "${C_CYAN}ℹ${C_RESET} $*"; }
-log_success() { echo -e "${C_GREEN}✔${C_RESET} $*"; }
-log_warn()    { echo -e "${C_YELLOW}⚠${C_RESET} $*"; }
-log_error()   { echo -e "${C_RED}✖${C_RESET} $*" >&2; }
-log_step()    { echo -e "${C_BOLD}${C_BLUE}==>${C_RESET} ${C_BOLD}$*${C_RESET}"; }
-
-GITHUB_REPO="https://github.com/GregoryBiter/devtool-script.git"
-DEFAULT_INSTALL_DIR="$HOME/.devtools"
-
-echo
-echo -e "${C_BOLD}${C_CYAN}╔════════════════════════════════════════════════════════════╗${C_RESET}"
-echo -e "${C_BOLD}${C_CYAN}║             🚀 DevTool CLI — Автоустановщик                ║${C_RESET}"
-echo -e "${C_BOLD}${C_CYAN}╚════════════════════════════════════════════════════════════╝${C_RESET}"
-echo
-
-# 1. Проверка системных требований: Git и Bash 4+
-if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
-    log_error "Требуется Bash версии 4.0 или выше (у вас $BASH_VERSION)."
-    exit 1
-fi
-
-if ! command -v git >/dev/null 2>&1; then
-    log_error "Git не найден. Пожалуйста, установите Git перед продолжением:"
-    echo "  sudo apt install git   # Debian/Ubuntu"
-    echo "  brew install git      # macOS"
-    exit 1
-fi
-
-# 2. Определение режима запуска (локальный или удаленный через curl/pipe)
-IS_PIPED=0
-if [[ -z "${BASH_SOURCE[0]:-}" ]] || [[ "${BASH_SOURCE[0]}" == "-" ]] || [[ "${BASH_SOURCE[0]}" == "/dev/fd/"* ]] || [[ "${BASH_SOURCE[0]}" == *"/stdin"* ]]; then
-    IS_PIPED=1
-fi
-
-CURRENT_DIR=""
-if [[ $IS_PIPED -eq 0 ]]; then
-    CURRENT_DIR="$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-fi
-
-# Проверка, находимся ли мы уже внутри репозитория devtool-script
-if [[ -n "$CURRENT_DIR" ]] && [[ -f "$CURRENT_DIR/bin/dev" ]] && [[ -d "$CURRENT_DIR/scripts" ]]; then
-    REPO_DIR="$CURRENT_DIR"
-    log_info "Используется локальная директория репозитория: ${C_BOLD}$REPO_DIR${C_RESET}"
+# 2. Ссылка dev в PATH
+if [[ $GLOBAL == 1 ]]; then
+    BIN_DIR="/usr/local/bin"
+    SUDO=""; [[ -w "$BIN_DIR" ]] || SUDO="sudo"
+    $SUDO ln -sf "$ROOT/bin/dev" "$BIN_DIR/dev"
 else
-    # Режим установки через curl или из внешней папки
-    REPO_DIR="${DEVTOOL_DIR:-$DEFAULT_INSTALL_DIR}"
+    BIN_DIR="$HOME/.local/bin"
+    mkdir -p "$BIN_DIR"
+    ln -sf "$ROOT/bin/dev" "$BIN_DIR/dev"
+fi
+ok "Команда: $BIN_DIR/dev"
 
-    if [[ -d "$REPO_DIR/.git" ]] && [[ -f "$REPO_DIR/bin/dev" ]]; then
-        log_step "DevTool уже установлен в $REPO_DIR. Выполняем обновление через Git..."
-        git -C "$REPO_DIR" fetch origin
-        BRANCH=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-        git -C "$REPO_DIR" pull --ff-only origin "$BRANCH" || {
-            log_warn "Не удалось выполнить fast-forward pull. Пробуем переключиться на origin/main..."
-            git -C "$REPO_DIR" reset --hard "origin/$BRANCH"
-        }
-        log_success "Репозиторий успешно обновлен."
-    elif [[ -d "$REPO_DIR" ]] && [[ ! -d "$REPO_DIR/.git" ]]; then
-        log_error "Каталог $REPO_DIR уже существует, но не является Git-репозиторием."
-        echo "Пожалуйста, удалите или переименуйте его, либо укажите другую папку через DEVTOOL_DIR."
-        exit 1
+SH="bash"; [[ "${SHELL:-}" == *zsh ]] && SH="zsh"
+RC="$HOME/.${SH}rc"
+if [[ ":$PATH:" != *":$BIN_DIR:"* ]] && ! grep -qs "$BIN_DIR" "$RC"; then
+    printf '\n# dev\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$RC"
+    ok "PATH дописан в $RC"
+fi
+if ! grep -qs "dev completion" "$RC"; then
+    printf '\n# dev: автодополнение по Tab\ncommand -v dev >/dev/null && eval "$(dev completion %s)"\n' "$SH" >> "$RC"
+    ok "Автодополнение по Tab подключено в $RC"
+fi
+warn "Перезапустите терминал или выполните: source $RC"
+
+# 3. Папка для пакетов скриптов
+mkdir -p "$SCRIPTS_HOME"
+ok "Скрипты: $SCRIPTS_HOME"
+for url in "${PACKS[@]}"; do
+    name="$(basename "$url" .git)"
+    if [[ -d "$SCRIPTS_HOME/$name" ]]; then
+        warn "Пакет $name уже есть — пропуск"
     else
-        log_step "Клонирование репозитория DevTool из GitHub..."
-        mkdir -p "$(dirname "$REPO_DIR")"
-        git clone "$GITHUB_REPO" "$REPO_DIR"
-        log_success "Репозиторий успешно склонирован в $REPO_DIR"
+        git clone -q "$url" "$SCRIPTS_HOME/$name" && ok "Пакет подключён: $name"
     fi
-fi
+done
 
-BIN_SOURCE="$REPO_DIR/bin/dev"
+command -v fzf >/dev/null 2>&1 || warn "Совет: установите fzf для поиска с превью (sudo apt install fzf / brew install fzf)"
 
-if [[ ! -f "$BIN_SOURCE" ]]; then
-    log_error "Файл исполнителя $BIN_SOURCE не найден. Ошибка целостности установки."
-    exit 1
-fi
+cat <<EOF
 
-# 3. Выставление прав на исполнение
-log_step "Настройка прав доступа..."
-chmod +x "$BIN_SOURCE" "$REPO_DIR/lib/utils.sh"
-find "$REPO_DIR/scripts" -type f -name "*.sh" -exec chmod +x {} +
-chmod +x "$REPO_DIR/install.sh" "$REPO_DIR/uninstall.sh" 2>/dev/null || true
-log_success "Права доступа выставлены."
-
-# 4. Выбор каталога для символической ссылки
-TARGET_DIR=""
-USE_SUDO=0
-
-if [[ "${1:-}" == "--global" ]] || [[ "${1:-}" == "-g" ]]; then
-    TARGET_DIR="/usr/local/bin"
-    if [[ $EUID -ne 0 ]] && [[ ! -w "$TARGET_DIR" ]]; then
-        USE_SUDO=1
-    fi
-elif [[ $EUID -eq 0 ]] || [[ -w "/usr/local/bin" ]]; then
-    # Если запущен под root или каталог доступен на запись
-    TARGET_DIR="/usr/local/bin"
-    USE_SUDO=0
-else
-    # Стандартный путь пользователя (не требует sudo, безопасно для curl | bash)
-    TARGET_DIR="$HOME/.local/bin"
-    USE_SUDO=0
-fi
-
-mkdir -p "$TARGET_DIR"
-TARGET_LINK="$TARGET_DIR/dev"
-
-log_step "Создание символической ссылки: ${C_CYAN}$TARGET_LINK${C_RESET} -> ${C_DIM}$BIN_SOURCE${C_RESET}..."
-
-if [[ $USE_SUDO -eq 1 ]]; then
-    sudo ln -sf "$BIN_SOURCE" "$TARGET_LINK"
-else
-    ln -sf "$BIN_SOURCE" "$TARGET_LINK"
-fi
-log_success "Символическая ссылка создана в $TARGET_LINK"
-
-# 5. Автоматическая настройка PATH, если выбран ~/.local/bin
-if [[ "$TARGET_DIR" == "$HOME/.local/bin" ]]; then
-    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-        log_step "Настройка переменной PATH в профиле оболочки..."
-        
-        # Определяем файл конфигурации пользователя
-        TARGET_RC=""
-        if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" =~ "zsh" ]]; then
-            TARGET_RC="$HOME/.zshrc"
-        elif [[ -f "$HOME/.bashrc" ]]; then
-            TARGET_RC="$HOME/.bashrc"
-        elif [[ -f "$HOME/.bash_profile" ]]; then
-            TARGET_RC="$HOME/.bash_profile"
-        elif [[ -f "$HOME/.profile" ]]; then
-            TARGET_RC="$HOME/.profile"
-        fi
-
-        if [[ -n "$TARGET_RC" ]]; then
-            if ! grep -q "PATH=.*$HOME/\.local/bin" "$TARGET_RC" 2>/dev/null; then
-                echo "" >> "$TARGET_RC"
-                echo "# DevTool CLI" >> "$TARGET_RC"
-                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$TARGET_RC"
-                log_success "Строка экспорта PATH добавлена в $TARGET_RC"
-            fi
-        fi
-        
-        export PATH="$HOME/.local/bin:$PATH"
-        log_warn "Чтобы команда 'dev' стала доступна в текущей вкладке терминала, выполните:"
-        echo -e "     ${C_BOLD}${C_GREEN}source ${TARGET_RC:-~/.bashrc}${C_RESET}   (или перезапустите терминал)"
-    fi
-fi
-
-# 6. Каталог персональных пользовательских скриптов и шаблон-пример
-USER_SCRIPTS_DIR="${DEV_USER_SCRIPTS_DIR:-$HOME/.dev-tools-scripts}"
-mkdir -p "$USER_SCRIPTS_DIR"
-
-if [[ ! -f "$USER_SCRIPTS_DIR/README.md" ]]; then
-    log_step "Подготовка каталога для пользовательских скриптов: ${C_CYAN}$USER_SCRIPTS_DIR${C_RESET}..."
-    cat << 'EOF' > "$USER_SCRIPTS_DIR/README.md"
-# 🛠 Персональные скрипты DevTool
-
-Каталог для добавления собственных скриптов для DevTool CLI (`dev`).
-
-## Быстрый старт:
-
-В каталоге `example/` находится готовый скрипт-пример:
-```bash
-dev example sample
-```
-
-## Как создать свой скрипт:
-
-1. **Скопировать пример**:
-   ```bash
-   mkdir -p ~/.dev-tools-scripts/mytools
-   cp ~/.dev-tools-scripts/example/sample.sh ~/.dev-tools-scripts/mytools/mycommand.sh
-   ```
-
-2. **Или использовать команду генератора**:
-   ```bash
-   dev dev create mytools mycommand
-   ```
-
-3. **Или создать вручную**:
-   Создайте `.sh` файл в подпапке категории или прямо в корне каталога и сделайте исполняемым (`chmod +x`).
+Готово. Дальше:
+  dev new              создать свой скрипт
+  dev add <git-url>    подключить репозиторий со скриптами
+  dev                  меню
 EOF
-    log_success "Каталог пользовательских скриптов создан: $USER_SCRIPTS_DIR"
-fi
-
-EXAMPLE_SCRIPT="$USER_SCRIPTS_DIR/example/sample.sh"
-if [[ ! -f "$EXAMPLE_SCRIPT" ]]; then
-    mkdir -p "$(dirname "$EXAMPLE_SCRIPT")"
-    cat << 'EOF' > "$EXAMPLE_SCRIPT"
-#!/usr/bin/env bash
-# @name Пример пользовательского скрипта
-# @description Шаблон для создания ваших собственных команд DevTool
-# @usage dev example sample [ваше_имя]
-# @dangerous false
-
-set -e
-
-# ==============================================================================
-# 💡 Как создать свой скрипт на основе этого шаблона:
-# 1. Скопируйте этот файл под новым именем или в другую категорию:
-#    cp ~/.dev-tools-scripts/example/sample.sh ~/.dev-tools-scripts/mytools/mycmd.sh
-# 2. Отредактируйте метаданные выше (@name, @description, @usage, @dangerous)
-# 3. Напишите вашу bash-логику ниже
-# 4. Скрипт сразу появится в 'dev list' и будет готов к запуску:
-#    dev mytools mycmd
-# ==============================================================================
-
-NAME="${1:-Разработчик}"
-
-echo "👋 Привет, $NAME!"
-echo "✔ Скрипт успешно выполнен из: ~/.dev-tools-scripts/example/sample.sh"
-echo
-echo "💡 Чтобы добавить собственную команду:"
-echo "   1) Скопируйте этот файл: cp ~/.dev-tools-scripts/example/sample.sh ~/.dev-tools-scripts/<категория>/<команда>.sh"
-echo "   2) Или используйте генератор: dev dev create <категория> <команда>"
-EOF
-    chmod +x "$EXAMPLE_SCRIPT"
-    log_success "Создан пример пользовательского скрипта: $EXAMPLE_SCRIPT"
-fi
-
-# 7. Проверка fzf
-echo
-if ! command -v fzf >/dev/null 2>&1; then
-    echo -e "${C_YELLOW}💡 Рекомендация:${C_RESET}"
-    echo "   Утилита 'fzf' не найдена. Лаунчер полностью работает и без нее,"
-    echo "   но с fzf доступен мгновенный интерактивный поиск команд с живым превью."
-    echo -e "   Установить: ${C_BOLD}sudo apt install fzf${C_RESET} (Debian/Ubuntu) или ${C_BOLD}brew install fzf${C_RESET} (macOS)"
-    echo
-fi
-
-echo -e "${C_BOLD}${C_GREEN}════════════════════════════════════════════════════════════${C_RESET}"
-echo -e "${C_BOLD}${C_GREEN}✔ DevTool CLI успешно установлен и готов к работе!${C_RESET}"
-echo -e "${C_BOLD}${C_GREEN}════════════════════════════════════════════════════════════${C_RESET}"
-echo
-echo -e "Доступные команды:"
-echo -e "  ${C_CYAN}dev${C_RESET}                     — интерактивное меню (поиск и запуск)"
-echo -e "  ${C_CYAN}dev list${C_RESET}                — список всех доступных команд"
-echo -e "  ${C_CYAN}dev git sync${C_RESET}            — синхронизация репозитория git"
-echo -e "  ${C_CYAN}dev update${C_RESET}              — автоматическое обновление devtool через Git"
-echo -e "  ${C_CYAN}dev doctor${C_RESET}              — проверка системных зависимостей"
-echo

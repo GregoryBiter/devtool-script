@@ -1,425 +1,589 @@
 #!/usr/bin/env bash
-# bin/dev - Единый лаунчер сценариев devtool
+# dev — лаунчер личных скриптов.
+#
+# Ядро не содержит ни одного скрипта. Скрипты живут в «пакетах»:
+#   $DEV_SCRIPTS_HOME/<пакет>/<путь>/<команда>.sh     (по умолчанию ~/.dev-scripts)
+# Каждый пакет — обычная папка (обычно отдельный git-репозиторий).
+# Путь файла внутри пакета = команда:  git/tag.sh  ->  dev git tag
+# Файлы и папки, начинающиеся с «.» или «_», игнорируются (например _lib/).
 
-set -e
+set -euo pipefail
 
-# Определение базовой директории репозитория (даже при запуске через symlink)
+DEV_VERSION="2.0.0"
+
+# --- Пути -----------------------------------------------------------------
 SOURCE="${BASH_SOURCE[0]}"
-while [[ -h "$SOURCE" ]]; do
-    DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+while [[ -L "$SOURCE" ]]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
     SOURCE="$(readlink "$SOURCE")"
-    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
-DEV_ROOT_DIR="$( cd -P "$( dirname "$SOURCE" )/.." >/dev/null 2>&1 && pwd )"
-export DEV_ROOT_DIR
+DEV_BIN="$(cd -P "$(dirname "$SOURCE")" && pwd)/$(basename "$SOURCE")"
+DEV_ROOT_DIR="$(dirname "$(dirname "$DEV_BIN")")"
+DEV_SCRIPTS_HOME="${DEV_SCRIPTS_HOME:-$HOME/.dev-scripts}"
+DEV_FORCE="${DEV_FORCE:-0}"
+export DEV_ROOT_DIR DEV_SCRIPTS_HOME DEV_FORCE
 
-DEV_USER_SCRIPTS_DIR="${DEV_USER_SCRIPTS_DIR:-$HOME/.dev-tools-scripts}"
-export DEV_USER_SCRIPTS_DIR
+# --- Вывод ----------------------------------------------------------------
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    B=$'\e[1m' D=$'\e[2m' R=$'\e[31m' G=$'\e[32m' Y=$'\e[33m' C=$'\e[36m' N=$'\e[0m'
+else
+    B='' D='' R='' G='' Y='' C='' N=''
+fi
+info() { echo "${C}ℹ${N} $*"; }
+ok()   { echo "${G}✔${N} $*"; }
+warn() { echo "${Y}⚠${N} $*"; }
+die()  { echo "${R}✖${N} $*" >&2; exit 1; }
+ask()  { local a; read -r -p "$1" a || a=""; echo "$a"; }  # ask "Вопрос: " (prompt -> stderr)
 
-# Загрузка утилит
-# shellcheck source=lib/utils.sh
-source "$DEV_ROOT_DIR/lib/utils.sh"
+# --- Пакеты и индекс команд -------------------------------------------------
 
-DEV_VERSION="1.1.0"
-
-show_version() {
-    echo "devtool CLI version $DEV_VERSION"
-    echo "Root directory: $DEV_ROOT_DIR"
-    echo "User scripts:   $DEV_USER_SCRIPTS_DIR"
-}
-
-show_help() {
-    echo -e "${C_BOLD}${C_CYAN}DevTool CLI${C_RESET} — лаунчер сценариев для разработки и DevOps"
-    echo
-    echo -e "${C_BOLD}Использование:${C_RESET}"
-    echo "  dev                                     Интерактивный запуск (через fzf или меню)"
-    echo "  dev <category>                          Интерактивный выбор внутри категории"
-    echo "  dev <category> <command> [аргументы...] Прямой запуск команды"
-    echo "  dev <category>:<command> [аргументы...] Запуск через двоеточие"
-    echo "  dev <category>-<command> [аргументы...] Запуск через дефис (например: dev git-sync)"
-    echo
-    echo -e "${C_BOLD}Системные команды:${C_RESET}"
-    echo "  dev list [category]                     Список всех доступных скриптов"
-    echo "  dev help <category> <command>           Подробная справка по команде"
-    echo "  dev update                              Обновить devtool через git pull"
-    echo "  dev doctor                              Проверить окружение и зависимости"
-    echo
-    echo -e "${C_BOLD}Флаги:${C_RESET}"
-    echo "  -y, --yes, --force                      Пропустить подтверждение для опасных команд"
-    echo "  -h, --help                              Показать эту справку"
-    echo "  -v, --version                           Показать версию"
-    echo
-    echo -e "${C_BOLD}Категории скриптов:${C_RESET}"
-    local categories
-    mapfile -t categories < <(get_all_categories)
-    for cat in "${categories[@]}"; do
-        echo -e "  • ${C_GREEN}${cat}${C_RESET}"
+# Печатает "имя<TAB>папка" для каждого пакета. Проектный .dev/ идёт первым.
+pack_dirs() {
+    if [[ -d "$PWD/.dev" ]]; then printf 'project\t%s\n' "$PWD/.dev"; fi
+    [[ -d "$DEV_SCRIPTS_HOME" ]] || return 0
+    local d n
+    for d in "$DEV_SCRIPTS_HOME"/*/; do
+        [[ -d "$d" ]] || continue
+        n="$(basename "$d")"
+        [[ "$n" == [._]* ]] && continue
+        printf '%s\t%s\n' "$n" "${d%/}"
     done
-    echo
-    echo -e "Примеры:"
-    echo "  dev git sync main"
-    echo "  dev docker clean"
-    echo "  dev laravel reset --force"
-    echo "  dev server health"
 }
 
-show_command_help() {
-    local category="$1"
-    local command_name="$2"
+declare -A CMD_FILE=() CMD_PACK=()
+INDEX_LOADED=0
 
-    local script_file
-    script_file=$(resolve_script_path "$category" "$command_name") || {
-        log_error "Команда '$category $command_name' не найдена."
-        exit 1
-    }
+# Собирает все команды: "git tag" -> файл. При совпадении имён побеждает
+# пакет, стоящий раньше (project, затем по алфавиту).
+load_index() {
+    [[ "$INDEX_LOADED" == 1 ]] && return 0
+    INDEX_LOADED=1
+    local pack dir file rel key
+    while IFS=$'\t' read -r pack dir; do
+        while IFS= read -r file; do
+            rel="${file#"$dir"/}"
+            key="${rel%.sh}"
+            key="${key//\// }"
+            [[ -n "${CMD_FILE[$key]:-}" ]] && continue
+            CMD_FILE[$key]="$file"
+            CMD_PACK[$key]="$pack"
+        done < <(find -L "$dir" -mindepth 1 \( -name '.*' -o -name '_*' \) -prune \
+                   -o -type f -name '*.sh' -print 2>/dev/null | sort)
+    done < <(pack_dirs)
+}
 
-    local title desc usage dangerous
-    title=$(get_metadata "$script_file" "name" "$category $command_name")
-    desc=$(get_metadata "$script_file" "description" "Описание отсутствует")
-    usage=$(get_metadata "$script_file" "usage" "dev $category $command_name")
-    dangerous=$(get_metadata "$script_file" "dangerous" "false")
+sorted_keys() { load_index; [[ ${#CMD_FILE[@]} -gt 0 ]] && printf '%s\n' "${!CMD_FILE[@]}" | sort; return 0; }
 
-    echo -e "${C_BOLD}${C_CYAN}Справка по команде:${C_RESET} ${C_BOLD}${category} ${command_name}${C_RESET}"
-    echo "────────────────────────────────────────────────────────"
-    echo -e "${C_BOLD}Название:${C_RESET}     $title"
-    echo -e "${C_BOLD}Категория:${C_RESET}    $category"
-    echo -e "${C_BOLD}Описание:${C_RESET}     $desc"
-    echo -e "${C_BOLD}Использование:${C_RESET}$usage"
-    if [[ "$dangerous" == "true" ]]; then
-        echo -e "${C_BOLD}Опасность:${C_RESET}    ${C_RED}Да (требуется подтверждение перед запуском)${C_RESET}"
+# meta <файл> <ключ-regex> [умолчание] — читает "# @ключ значение" из шапки
+meta() {
+    local v
+    v="$(head -n 40 "$1" | sed -nE "s/^#[[:space:]]*@($2)[:=]?[[:space:]]+//p" | head -n 1)"
+    v="${v%"${v##*[![:space:]]}"}"
+    echo "${v:-${3:-}}"
+}
+desc_of()      { meta "$1" 'desc|description' "$(meta "$1" name "")"; }
+dangerous_of() { [[ "$(meta "$1" dangerous false)" == true ]]; }
+
+pack_dir_of() { pack_dirs | awk -F'\t' -v p="$1" '$1==p {print $2; exit}'; }
+
+# Находит команду по аргументам. Печатает "<ключ>\t<сколько аргументов съедено>".
+# Порядок: самое длинное точное совпадение -> уникальное имя последнего слова.
+# Код возврата: 1 — не найдено, 2 — неоднозначно (варианты уже выведены).
+resolve() {
+    load_index
+    local args=("$@") n max=0 key
+    for key in "${args[@]}"; do [[ "$key" == -* || $max -ge 6 ]] && break; max=$((max+1)); done
+    for ((n=max; n>=1; n--)); do
+        key="${args[*]:0:n}"
+        if [[ -n "${CMD_FILE[$key]:-}" ]]; then printf '%s\t%s\n' "$key" "$n"; return 0; fi
+    done
+    [[ $max -ge 1 ]] || return 1
+    local matches=()
+    while IFS= read -r key; do
+        [[ -n "$key" && "${key##* }" == "${args[0]}" ]] && matches+=("$key")
+    done < <(sorted_keys)
+    if [[ ${#matches[@]} -eq 1 ]]; then printf '%s\t1\n' "${matches[0]}"; return 0; fi
+    if [[ ${#matches[@]} -gt 1 ]]; then
+        warn "Имя '${args[0]}' неоднозначно, уточните:" >&2
+        printf '  dev %s\n' "${matches[@]}" >&2
+        return 2
+    fi
+    return 1
+}
+
+# --- Запуск ---------------------------------------------------------------
+
+run_key() {
+    local key="$1"; shift
+    local file="${CMD_FILE[$key]}"
+    if dangerous_of "$file" && [[ "$DEV_FORCE" != 1 ]]; then
+        echo
+        echo "${B}${R}⚠  Опасная команда:${N} ${B}dev $key${N}"
+        echo "   $(desc_of "$file")"
+        echo "   ${D}$file${N}"
+        case "$(ask "Продолжить? [y/N]: ")" in
+            [yYдД]*) ;;
+            *) warn "Отменено."; exit 1 ;;
+        esac
+    fi
+    DEV_PACK_DIR="$(pack_dir_of "${CMD_PACK[$key]}")"
+    export DEV_PACK_DIR
+    exec bash "$file" "$@"
+}
+
+# Интерактивный выбор (fzf, если есть, иначе нумерованное меню)
+pick() {
+    local prefix="${1:-}" keys=() k
+    while IFS= read -r k; do
+        [[ -n "$k" ]] || continue
+        [[ -z "$prefix" || "$k" == "$prefix "* ]] && keys+=("$k")
+    done < <(sorted_keys)
+    [[ ${#keys[@]} -gt 0 ]] || { no_scripts_hint; exit 0; }
+
+    local chosen=""
+    if command -v fzf >/dev/null 2>&1; then
+        chosen="$(for k in "${keys[@]}"; do
+                      printf '%-24s %s\t%s\t%s\n' "$k" "$(desc_of "${CMD_FILE[$k]}")" "$k" "${CMD_FILE[$k]}"
+                  done | fzf --prompt="dev > " --delimiter=$'\t' --with-nth=1 \
+                             --preview="$(printf '%q' "$DEV_BIN") _preview {3}" \
+                             --preview-window=right:55%:wrap | cut -f2)" || true
     else
-        echo -e "${C_BOLD}Опасность:${C_RESET}    ${C_GREEN}Нет (безопасный запуск)${C_RESET}"
+        local i=1
+        for k in "${keys[@]}"; do
+            local mark=""; dangerous_of "${CMD_FILE[$k]}" && mark=" ${R}[!]${N}"
+            printf " %s%2d)%s %s%-22s%s%s %s%s%s\n" "$B" "$i" "$N" "$G" "$k" "$N" "$mark" "$D" "$(desc_of "${CMD_FILE[$k]}")" "$N"
+            i=$((i+1))
+        done
+        echo "${D}(совет: установите fzf для поиска с превью)${N}"
+        local n; n="$(ask "Номер (Enter — выход): ")"
+        [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#keys[@]} )) && chosen="${keys[$((n-1))]}"
     fi
-    echo -e "${C_BOLD}Файл:${C_RESET}         ${C_DIM}$script_file${C_RESET}"
-    echo "────────────────────────────────────────────────────────"
+    [[ -n "$chosen" ]] && run_key "$chosen"
+    exit 0
 }
 
-# Внутренняя функция для превью в fzf
-show_fzf_preview() {
-    local item="$1"
-    local cat cmd
-    IFS=':' read -r cat cmd _ <<< "$item"
-
-    local script_file
-    script_file=$(resolve_script_path "$cat" "$cmd") || return 0
-
-    local title desc usage dangerous
-    title=$(get_metadata "$script_file" "name" "$cat $cmd")
-    desc=$(get_metadata "$script_file" "description" "Описание отсутствует")
-    usage=$(get_metadata "$script_file" "usage" "dev $cat $cmd")
-    dangerous=$(get_metadata "$script_file" "dangerous" "false")
-
-    echo -e "\033[1;36m=== $title ($cat:$cmd) ===\033[0m"
-    echo
-    echo -e "\033[1mОписание:\033[0m    $desc"
-    echo -e "\033[1mВызов:\033[0m       $usage"
-    if [[ "$dangerous" == "true" ]]; then
-        echo -e "\033[1;31mВнимание:    Опасная команда (требует подтверждения)!\033[0m"
-    fi
-    echo -e "\033[2mПуть:        $script_file\033[0m"
-    echo
-    echo -e "\033[1;33m--- Код скрипта (первые строки) ---\033[0m"
-    head -n 25 "$script_file" | sed 's/^/  /'
+no_scripts_hint() {
+    warn "Скриптов пока нет."
+    echo "  Создайте первый:      ${B}dev new${N}"
+    echo "  Или подключите пакет: ${B}dev add <git-url|папка>${N}"
 }
 
-list_commands() {
-    local filter_category="${1:-}"
-    local scripts
-    mapfile -t scripts < <(get_all_scripts "$filter_category")
+# --- Встроенные команды -----------------------------------------------------
 
-    if [[ ${#scripts[@]} -eq 0 ]]; then
-        log_warn "Скрипты не найдены."
-        return
+cmd_list() {
+    local prefix="${*:-}" k w=10
+    local keys=()
+    while IFS= read -r k; do
+        [[ -n "$k" ]] || continue
+        [[ -z "$prefix" || "$k" == "$prefix" || "$k" == "$prefix "* ]] && keys+=("$k")
+    done < <(sorted_keys)
+    [[ ${#keys[@]} -gt 0 ]] || { no_scripts_hint; return 0; }
+    for k in "${keys[@]}"; do (( ${#k} > w )) && w=${#k}; done
+    local cols; cols="$( { tput cols || echo 120; } 2>/dev/null)"
+    local dw=$(( cols - w - 18 )); (( dw < 30 )) && dw=30
+    for k in "${keys[@]}"; do
+        local f="${CMD_FILE[$k]}" mark="   " ds
+        dangerous_of "$f" && mark="${R} ! ${N}"
+        ds="$(desc_of "$f")"; (( ${#ds} > dw )) && ds="${ds:0:dw-1}…"
+        printf "  %s%-${w}s%s%s%s%-10s%s %s\n" "$B" "$k" "$N" "$mark" "$D" "${CMD_PACK[$k]}" "$N" "$ds"
+    done
+}
+
+cmd_packs() {
+    local pack dir cnt remote found=0
+    echo "${B}Пакеты${N} ${D}($DEV_SCRIPTS_HOME)${N}"
+    while IFS=$'\t' read -r pack dir; do
+        found=1
+        cnt="$(find -L "$dir" -mindepth 1 \( -name '.*' -o -name '_*' \) -prune -o -type f -name '*.sh' -print 2>/dev/null | wc -l)"
+        remote="$(git -C "$dir" remote get-url origin 2>/dev/null || echo "—")"
+        printf "  %s%-14s%s %3s скр.  %s%s%s\n" "$G" "$pack" "$N" "$cnt" "$D" "$remote" "$N"
+    done < <(pack_dirs)
+    [[ $found == 1 ]] || echo "  (пусто) — dev new или dev add <git-url>"
+}
+
+cmd_help() {
+    if [[ $# -gt 0 ]]; then
+        local r key file
+        r="$(resolve "$@")" || { [[ $? == 2 ]] && exit 1; die "Команда не найдена: $*"; }
+        key="${r%%$'\t'*}"; file="${CMD_FILE[$key]}"
+        echo "${B}dev $key${N}"
+        echo "  $(desc_of "$file")"
+        echo "  ${B}Вызов:${N}  $(meta "$file" usage "dev $key")"
+        dangerous_of "$file" && echo "  ${R}Опасная: спросит подтверждение (пропустить: dev -y $key)${N}"
+        echo "  ${D}Пакет: ${CMD_PACK[$key]}  Файл: $file${N}"
+        return 0
     fi
+    cat <<EOF
+${B}${C}dev${N} — лаунчер личных скриптов  ${D}v$DEV_VERSION${N}
 
-    echo -e "${C_BOLD}${C_CYAN}Доступные команды devtool:${C_RESET}"
-    echo -ne "  ${C_BOLD}"
-    pad_to "КОМАНДА" 23
-    pad_to "НАЗВАНИЕ" 24
-    pad_to "ОПАСНО" 8
-    echo -e "ОПИСАНИЕ${C_RESET}"
-    echo "  ──────────────────────────────────────────────────────────────────────────────────────────────────"
+${B}Запуск${N}
+  dev                      меню выбора (fzf или список)
+  dev <команда> [арг...]   запуск, например: dev git tag patch
+  dev <папка>              меню внутри папки, например: dev git
+  dev -y <команда>         без подтверждения для опасных
 
-    for entry in "${scripts[@]}"; do
-        local cat cmd file
-        IFS=':' read -r cat cmd file <<< "$entry"
-        local title desc dangerous
-        title=$(get_metadata "$file" "name" "$cmd")
-        desc=$(get_metadata "$file" "description" "-")
-        dangerous=$(get_metadata "$file" "dangerous" "false")
+${B}Управление${N}
+  dev new [команда]        создать скрипт из шаблона (спросит всё сам)
+  dev edit <команда>       открыть скрипт в \$EDITOR
+  dev list [папка]         список команд
+  dev help <команда>       описание команды
+  dev packs                список пакетов (папок со скриптами)
+  dev add <url|папка> [имя]  подключить пакет (git clone или ссылка)
+  dev update               обновить ядро и все пакеты (git pull)
+  dev doctor               проверить окружение
+  dev completion           включить автодополнение по Tab
 
-        local dang_text="нет"
-        local dang_color="$C_GREEN"
-        if [[ "$dangerous" == "true" ]]; then
-            dang_text="ДА"
-            dang_color="$C_RED"
+${B}Где лежат скрипты${N}
+  $DEV_SCRIPTS_HOME/<пакет>/<папка>/<команда>.sh
+  ./.dev/<папка>/<команда>.sh   — скрипты текущего проекта
+EOF
+}
+
+cmd_edit() {
+    [[ $# -gt 0 ]] || die "Укажите команду: dev edit git tag"
+    local r key
+    r="$(resolve "$@")" || { [[ $? == 2 ]] && exit 1; die "Команда не найдена: $*"; }
+    key="${r%%$'\t'*}"
+    open_editor "${CMD_FILE[$key]}"
+}
+
+open_editor() {
+    local ed="${VISUAL:-${EDITOR:-}}"
+    if [[ -z "$ed" ]]; then
+        for ed in code nano vim vi; do command -v "$ed" >/dev/null 2>&1 && break; done
+    fi
+    # shellcheck disable=SC2086
+    exec $ed "$1"
+}
+
+cmd_new() {
+    local name=() desc="" pack="" danger="" edit=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--desc)   desc="${2:-}"; shift 2 ;;
+            -p|--pack)   pack="${2:-}"; shift 2 ;;
+            --dangerous) danger=true; shift ;;
+            --safe)      danger=false; shift ;;
+            --no-edit)   edit=0; shift ;;
+            -*)          die "Неизвестный флаг: $1" ;;
+            *)           name+=("$1"); shift ;;
+        esac
+    done
+    local interactive=0; [[ -t 0 ]] && interactive=1
+
+    # 1. Имя команды: "git cleanup", "git/cleanup" или "git:cleanup"
+    local key="${name[*]:-}"
+    if [[ -z "$key" ]]; then
+        [[ $interactive == 1 ]] || die "Укажите имя: dev new git cleanup"
+        echo "${D}Имя команды = путь к файлу. 'git cleanup' -> git/cleanup.sh -> dev git cleanup${N}"
+        key="$(ask "Команда: ")"
+    fi
+    local words w
+    key="${key,,}"
+    read -ra words <<<"${key//[\/:]/ }"
+    key="${words[*]:-}"
+    [[ -n "$key" ]] || die "Пустое имя команды."
+    for w in "${words[@]}"; do
+        [[ "$w" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "Недопустимое слово '$w' (только a-z, 0-9, -)"
+    done
+
+    # 2. Пакет
+    local packs=() p d
+    while IFS=$'\t' read -r p d; do packs+=("$p"); done < <(pack_dirs)
+    if [[ -z "$pack" ]]; then
+        if [[ ${#packs[@]} -eq 0 ]]; then
+            pack="my"
+        elif [[ ${#packs[@]} -eq 1 || $interactive == 0 ]]; then
+            pack="${packs[0]}"
+        else
+            echo "В какой пакет положить?"
+            local i=1; for p in "${packs[@]}"; do echo "  $i) $p"; i=$((i+1)); done
+            local n; n="$(ask "Номер [1]: ")"; n="${n:-1}"
+            [[ "$n" =~ ^[0-9]+$ ]] && (( n >= 1 && n <= ${#packs[@]} )) || die "Неверный номер."
+            pack="${packs[$((n-1))]}"
         fi
-
-        local full_cmd="${cat}:${cmd}"
-        echo -ne "  ${C_BOLD}"
-        pad_to "$full_cmd" 23
-        echo -ne "${C_RESET}"
-        pad_to "${title:0:22}" 24
-        echo -ne "${dang_color}"
-        pad_to "$dang_text" 8
-        echo -e "${C_RESET}${C_DIM}${desc}${C_RESET}"
-    done
-    echo
-}
-
-# Интерактивный режим с fzf
-interactive_fzf() {
-    local filter_category="${1:-}"
-    local scripts
-    mapfile -t scripts < <(get_all_scripts "$filter_category")
-
-    if [[ ${#scripts[@]} -eq 0 ]]; then
-        log_warn "Нет доступных скриптов для выбора."
-        exit 0
+    fi
+    local pdir; pdir="$(pack_dir_of "$pack")"
+    if [[ -z "$pdir" ]]; then
+        [[ "$pack" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || die "Недопустимое имя пакета: $pack"
+        pdir="$DEV_SCRIPTS_HOME/$pack"
+        mkdir -p "$pdir"
+        git -C "$pdir" init -q 2>/dev/null || true
+        ok "Создан новый пакет: $pdir"
     fi
 
-    local lines=()
-    for entry in "${scripts[@]}"; do
-        local cat cmd file
-        IFS=':' read -r cat cmd file <<< "$entry"
-        local desc
-        desc=$(get_metadata "$file" "description" "")
-        local key="${cat}:${cmd}"
-        lines+=("$(printf "%-22s  │ %s" "$key" "$desc")")
-    done
-
-    local selected
-    selected=$(printf "%s\n" "${lines[@]}" | fzf \
-        --prompt="DevTool > " \
-        --header="Выберите команду для запуска (Enter - запуск, Esc - выход)" \
-        --preview="$DEV_ROOT_DIR/bin/dev _preview {1}" \
-        --preview-window="right:55%:wrap" \
-        --ansi)
-
-    if [[ -z "$selected" ]]; then
-        exit 0
-    fi
-
-    local picked_key
-    picked_key=$(echo "$selected" | awk '{print $1}')
-    local picked_cat picked_cmd
-    IFS=':' read -r picked_cat picked_cmd <<< "$picked_key"
-
-    execute_command "$picked_cat" "$picked_cmd"
-}
-
-# Запасной интерактивный режим (без fzf)
-interactive_menu() {
-    local filter_category="${1:-}"
-    local scripts
-    mapfile -t scripts < <(get_all_scripts "$filter_category")
-
-    if [[ ${#scripts[@]} -eq 0 ]]; then
-        log_warn "Нет доступных скриптов для выбора."
-        exit 0
-    fi
-
-    echo -e "${C_BOLD}${C_CYAN}=== Меню DevTool CLI ===${C_RESET}"
-    if [[ -z "$filter_category" ]]; then
-        echo -e "${C_DIM}Выберите номер команды для запуска:${C_RESET}"
-    else
-        echo -e "${C_DIM}Категория: ${C_BOLD}${filter_category}${C_RESET}"
-    fi
-    echo
-
-    local i=1
-    for entry in "${scripts[@]}"; do
-        local cat cmd file
-        IFS=':' read -r cat cmd file <<< "$entry"
-        local title desc dangerous
-        title=$(get_metadata "$file" "name" "$cmd")
-        desc=$(get_metadata "$file" "description" "")
-        dangerous=$(get_metadata "$file" "dangerous" "false")
-
-        local mark=""
-        if [[ "$dangerous" == "true" ]]; then
-            mark=" ${C_RED}[!]${C_RESET}"
+    # 3. Описание и опасность
+    if [[ -z "$desc" && $interactive == 1 ]]; then desc="$(ask "Описание (одной строкой): ")"; fi
+    desc="${desc:-TODO: описание}"
+    if [[ -z "$danger" ]]; then
+        danger=false
+        if [[ $interactive == 1 ]]; then
+            case "$(ask "Может что-то удалить/сломать (спрашивать подтверждение)? [y/N]: ")" in
+                [yYдД]*) danger=true ;;
+            esac
         fi
-
-        printf "  ${C_BOLD}%2d)${C_RESET} ${C_GREEN}%-18s${C_RESET}%b ${C_DIM}— %s${C_RESET}\n" \
-            "$i" "${cat}:${cmd}" "$mark" "$desc"
-        ((i++))
-    done
-
-    echo
-    echo -e "  ${C_BOLD}q)${C_RESET} Выход"
-    echo
-    echo -e "${C_DIM}💡 Совет: установите fzf (sudo apt install fzf) для мгновенного интерактивного поиска!${C_RESET}"
-    echo
-    echo -n "Ваш выбор: "
-
-    local choice
-    read -r choice
-
-    if [[ "$choice" == "q" ]] || [[ -z "$choice" ]]; then
-        exit 0
     fi
 
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#scripts[@]} )); then
-        local picked_entry="${scripts[$((choice-1))]}"
-        local picked_cat picked_cmd
-        IFS=':' read -r picked_cat picked_cmd _ <<< "$picked_entry"
-        execute_command "$picked_cat" "$picked_cmd"
+    # 4. Файл из шаблона
+    local file="$pdir/${key// //}.sh"
+    [[ -e "$file" ]] && die "Уже существует: $file"
+    load_index
+    [[ -n "${CMD_FILE[$key]:-}" ]] && warn "Команда 'dev $key' уже есть в пакете '${CMD_PACK[$key]}' — новая будет перекрыта или перекроет её."
+    mkdir -p "$(dirname "$file")"
+    cat >"$file" <<EOF
+#!/usr/bin/env bash
+# @desc $desc
+# @usage dev $key [аргументы]
+# @dangerous $danger
+#
+# \$1, \$2, ... — аргументы после имени команды.
+# \$DEV_PACK_DIR — корень пакета (общий код можно держать в _lib/ и подключать source).
+# Подсказки аргументов по Tab: строка вида «# @complete start stop status» в шапке.
+
+set -euo pipefail
+
+die()  { echo "✖ \$*" >&2; exit 1; }
+need() { command -v "\$1" >/dev/null 2>&1 || die "Нужна утилита: \$1"; }
+
+# need git
+ARG="\${1:-}"
+
+echo "==> dev $key \$ARG"
+# Ваш код здесь
+EOF
+    chmod +x "$file"
+    ok "Создан: ${B}$file${N}"
+    echo "  Запуск:        dev $key"
+    echo "  Редактировать: dev edit $key"
+    if [[ $edit == 1 && $interactive == 1 && -t 1 ]]; then
+        case "$(ask "Открыть в редакторе? [Y/n]: ")" in
+            [nNнН]*) ;;
+            *) open_editor "$file" ;;
+        esac
+    fi
+}
+
+cmd_add() {
+    local src="${1:-}" name="${2:-}"
+    [[ -n "$src" ]] || die "Использование: dev add <git-url|папка> [имя]"
+    mkdir -p "$DEV_SCRIPTS_HOME"
+    if [[ -d "$src" ]]; then
+        src="$(cd "$src" && pwd)"
+        name="${name:-$(basename "$src")}"
+        [[ -e "$DEV_SCRIPTS_HOME/$name" ]] && die "Пакет '$name' уже существует."
+        ln -s "$src" "$DEV_SCRIPTS_HOME/$name"
+        ok "Подключена папка как пакет '$name' (ссылка на $src)"
     else
-        log_error "Неверный номер."
-        exit 1
+        name="${name:-$(basename "$src" .git)}"
+        [[ -e "$DEV_SCRIPTS_HOME/$name" ]] && die "Пакет '$name' уже существует."
+        git clone "$src" "$DEV_SCRIPTS_HOME/$name"
+        ok "Пакет '$name' склонирован."
     fi
 }
 
-execute_command() {
-    local category="$1"
-    local command_name="$2"
-    shift 2 || true
-
-    local script_file
-    # `resolve_script_path` returns 1 when no matching file exists.  Keep that
-    # expected lookup failure out of `set -e` so we can show the useful error
-    # below instead of silently terminating the launcher.
-    script_file=$(resolve_script_path "$category" "$command_name") || script_file=""
-
-    if [[ -z "$script_file" ]] || [[ ! -f "$script_file" ]]; then
-        log_error "Команда не найдена: $category $command_name"
-        echo "Запустите 'dev list' для просмотра доступных команд."
-        exit 1
+git_pull() {  # git_pull <папка> <подпись>
+    local dir="$1" label="$2" old
+    if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "  ${D}$label: не git — пропуск${N}"; return 0
     fi
-
-    # Проверка на опасность
-    if ! confirm_if_dangerous "$script_file" "$category" "$command_name"; then
-        exit 1
+    if [[ -z "$(git -C "$dir" remote)" ]]; then
+        echo "  ${D}$label: нет remote — пропуск${N}"; return 0
     fi
-
-    # Запуск скрипта
-    exec bash "$script_file" "$@"
+    old="$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "")"
+    if git -C "$dir" pull --ff-only -q 2>/dev/null; then
+        if [[ "$old" == "$(git -C "$dir" rev-parse HEAD)" ]]; then
+            ok "$label: актуально"
+        else
+            ok "$label: обновлено"
+            git -C "$dir" log --oneline "$old..HEAD" | sed 's/^/      /'
+        fi
+    else
+        warn "$label: не удалось обновить (локальные изменения или расхождение) — $dir"
+    fi
 }
 
-# --- Разбор аргументов командной строки ---
-DEV_FORCE=0
+cmd_update() {
+    echo "${B}Обновление${N}"
+    git_pull "$DEV_ROOT_DIR" "ядро"
+    local p d
+    while IFS=$'\t' read -r p d; do
+        [[ "$p" == project ]] && continue
+        git_pull "$d" "пакет $p"
+    done < <(pack_dirs)
+}
 
-# Парсим глобальные опции в цикле
+cmd_doctor() {
+    chk() { if command -v "$1" >/dev/null 2>&1; then ok "$1"; else warn "$1 не найден ${D}($2)${N}"; fi; }
+    if (( BASH_VERSINFO[0] >= 4 )); then ok "bash $BASH_VERSION"; else warn "bash $BASH_VERSION — нужен 4+"; fi
+    chk git "обновление и пакеты"
+    chk fzf "поиск с превью; без него будет простое меню"
+    [[ -n "${VISUAL:-${EDITOR:-}}" ]] && ok "редактор: ${VISUAL:-$EDITOR}" || warn "EDITOR не задан ${D}(dev edit возьмёт code/nano/vim)${N}"
+    command -v dev >/dev/null 2>&1 && ok "dev в PATH: $(command -v dev)" || warn "dev не в PATH"
+    [[ -d "$DEV_SCRIPTS_HOME" ]] && ok "папка скриптов: $DEV_SCRIPTS_HOME" || warn "нет $DEV_SCRIPTS_HOME ${D}(создастся при dev new)${N}"
+    load_index; info "команд найдено: ${#CMD_FILE[@]}"
+}
+
+cmd_preview() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0
+    echo "${B}$(desc_of "$f")${N}"
+    echo "Вызов: $(meta "$f" usage "")"
+    dangerous_of "$f" && echo "${R}Опасная — спросит подтверждение${N}"
+    echo "${D}$f${N}"
+    echo
+    sed -n '1,40p' "$f"
+}
+
+# --- Автодополнение по Tab -------------------------------------------------
+
+BUILTINS=(new edit list help packs add update doctor completion)
+
+# Следующие слова после префикса: для "git" -> "tag", "undo"...
+# Печатает "слово\tописание" (описание — у команды, «папка» — у промежуточного уровня).
+next_words() {
+    local prefix="$*" k rest w
+    declare -A seen=()
+    while IFS= read -r k; do
+        [[ -n "$k" ]] || continue
+        if [[ -z "$prefix" ]]; then rest="$k"
+        elif [[ "$k" == "$prefix "* ]]; then rest="${k#"$prefix "}"
+        else continue; fi
+        w="${rest%% *}"
+        [[ -n "${seen[$w]:-}" ]] && continue
+        seen[$w]=1
+        if [[ "$rest" == "$w" ]]; then
+            printf '%s\t%s\n' "$w" "$(desc_of "${CMD_FILE[$k]}")"
+        else
+            printf '%s\t%s\n' "$w" "папка"
+        fi
+    done < <(sorted_keys)
+}
+
+# Варианты из «# @complete ...» найденной команды
+script_args() {
+    local r rc=0 key
+    r="$(resolve "$@" 2>/dev/null)" || rc=$?
+    [[ $rc == 0 ]] || return 0
+    key="${r%%$'\t'*}"
+    local w
+    for w in $(meta "${CMD_FILE[$key]}" complete ""); do printf '%s\t\n' "$w"; done
+}
+
+# dev _complete [--zsh] <слова до курсора...>
+cmd_complete() {
+    local zsh=0
+    [[ "${1:-}" == --zsh ]] && { zsh=1; shift; }
+    local words=() w
+    for w in "$@"; do
+        [[ ${#words[@]} -eq 0 && "$w" =~ ^(-y|--yes|--force)$ ]] && continue
+        words+=("$w")
+    done
+    {
+        if [[ ${#words[@]} -eq 0 ]]; then
+            for w in "${BUILTINS[@]}"; do printf '%s\t%s\n' "$w" "(dev)"; done
+            next_words
+        else
+            case "${words[0]}" in
+                edit|help|list|ls)
+                    next_words "${words[@]:1}" ;;
+                new|create)
+                    local last="${words[${#words[@]}-1]}" names=()
+                    if [[ "$last" == -p || "$last" == --pack ]]; then
+                        pack_dirs | cut -f1 | sed 's/$/\tпакет/'
+                    elif [[ "$last" != -d && "$last" != --desc ]]; then
+                        for w in "${words[@]:1}"; do [[ "$w" == -* ]] || names+=("$w"); done
+                        next_words "${names[@]}" | awk -F'\t' '$2=="папка"'
+                        printf '%s\t\n' -p --pack -d --desc --dangerous --safe --no-edit
+                    fi ;;
+                completion) printf '%s\t\n' bash zsh ;;
+                add|update|doctor|packs) ;;
+                *)
+                    local nw; nw="$(next_words "${words[@]}")"
+                    if [[ -n "$nw" ]]; then echo "$nw"; else script_args "${words[@]}"; fi ;;
+            esac
+        fi
+    } | if [[ $zsh == 1 ]]; then
+            awk -F'\t' '{ gsub(/:/, "\\:", $1); print ($2 == "" ? $1 : $1 ":" $2) }'
+        else
+            cut -f1
+        fi
+}
+
+cmd_completion() {
+    case "${1:-}" in
+        bash) cat <<'EOF'
+_dev_complete() {
+    local cur="${COMP_WORDS[COMP_CWORD]}" IFS=$'\n'
+    COMPREPLY=($(compgen -W "$(command dev _complete "${COMP_WORDS[@]:1:COMP_CWORD-1}" 2>/dev/null)" -- "$cur"))
+}
+complete -o default -F _dev_complete dev
+EOF
+        ;;
+        zsh) cat <<'EOF'
+_dev() {
+    local -a items
+    items=("${(@f)$(command dev _complete --zsh "${(@)words[2,CURRENT-1]}" 2>/dev/null)}")
+    if [[ -n "${items[1]}" ]]; then _describe -V 'dev' items; else _files; fi
+}
+(( $+functions[compdef] )) || { autoload -Uz compinit && compinit; }
+compdef _dev dev
+EOF
+        ;;
+        *)
+            echo "Подключите автодополнение, добавив в конфиг оболочки:"
+            echo "  bash (~/.bashrc): eval \"\$(dev completion bash)\""
+            echo "  zsh  (~/.zshrc):  eval \"\$(dev completion zsh)\""
+            ;;
+    esac
+}
+
+# --- Разбор аргументов ------------------------------------------------------
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -y|--yes|--force)
-            DEV_FORCE=1
-            export DEV_FORCE
-            shift
-            ;;
-        -v|--version)
-            show_version
-            exit 0
-            ;;
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        _preview)
-            shift
-            show_fzf_preview "${1:-}"
-            exit 0
-            ;;
-        list)
-            shift
-            list_commands "${1:-}"
-            exit 0
-            ;;
-        help)
-            shift
-            if [[ $# -ge 2 ]]; then
-                show_command_help "$1" "$2"
-            else
-                show_help
-            fi
-            exit 0
-            ;;
-        *)
-            break
-            ;;
+        -y|--yes|--force) DEV_FORCE=1; export DEV_FORCE; shift ;;
+        -h|--help)        cmd_help; exit 0 ;;
+        -v|--version)     echo "dev $DEV_VERSION ($DEV_ROOT_DIR)"; exit 0 ;;
+        *) break ;;
     esac
 done
 
-# Если аргументов нет — интерактивный запуск
-if [[ $# -eq 0 ]]; then
-    if command -v fzf >/dev/null 2>&1; then
-        interactive_fzf
-    else
-        interactive_menu
-    fi
-    exit 0
+# resolve() вызывается в $(...), поэтому индекс грузим заранее в основном процессе
+load_index
+[[ $# -eq 0 ]] && pick
+
+# "git:tag" -> "git tag"
+if [[ "$1" == *:* ]]; then
+    first="$1"; shift
+    read -ra parts <<<"${first//:/ }"
+    set -- "${parts[@]}" "$@"
 fi
 
-ARG1="$1"
-ARG2="${2:-}"
+case "$1" in
+    new|create)  shift; cmd_new "$@"; exit 0 ;;
+    edit)        shift; cmd_edit "$@"; exit 0 ;;
+    list|ls)     shift; cmd_list "$@"; exit 0 ;;
+    help)        shift; cmd_help "$@"; exit 0 ;;
+    packs)       shift; cmd_packs; exit 0 ;;
+    add)         shift; cmd_add "$@"; exit 0 ;;
+    update)      shift; cmd_update; exit 0 ;;
+    doctor)      shift; cmd_doctor; exit 0 ;;
+    completion)  shift; cmd_completion "$@"; exit 0 ;;
+    _complete)   shift; cmd_complete "$@"; exit 0 ;;
+    _preview)    shift; cmd_preview "${1:-}"; exit 0 ;;
+esac
 
-# 1. Формат "category:command"
-if [[ "$ARG1" == *":"* ]]; then
-    CAT="${ARG1%%:*}"
-    CMD="${ARG1##*:}"
-    shift
-    execute_command "$CAT" "$CMD" "$@"
+rc=0; r="$(resolve "$@")" || rc=$?
+if [[ $rc == 0 ]]; then
+    shift "${r##*$'\t'}"
+    run_key "${r%%$'\t'*}" "$@"
+fi
+[[ $rc == 2 ]] && exit 1
+
+# Имя папки -> меню внутри неё
+if [[ $# -eq 1 ]] && sorted_keys | grep -q "^$1 "; then
+    pick "$1"
 fi
 
-# 2. Формат "category-command" (например: git-sync, docker-clean, laravel-reset)
-if [[ "$ARG1" == *"-"* ]]; then
-    POSSIBLE_CAT="${ARG1%%-*}"
-    POSSIBLE_CMD="${ARG1#*-}"
-    if resolve_script_path "$POSSIBLE_CAT" "$POSSIBLE_CMD" >/dev/null 2>&1; then
-        shift
-        execute_command "$POSSIBLE_CAT" "$POSSIBLE_CMD" "$@"
-    fi
-fi
-
-# 3. Формат "dev <category> <command>"
-if [[ -n "$ARG2" ]] && [[ ! "$ARG2" =~ ^- ]]; then
-    if resolve_script_path "$ARG1" "$ARG2" >/dev/null 2>&1; then
-        shift 2
-        execute_command "$ARG1" "$ARG2" "$@"
-    fi
-fi
-
-# 4. Формат "dev <command>" для системных утилит в scripts/dev/
-if resolve_script_path "dev" "$ARG1" >/dev/null 2>&1; then
-    shift
-    execute_command "dev" "$ARG1" "$@"
-fi
-
-# 5. Если передан только один аргумент и это существующая категория — открываем меню категории
-CATEGORIES_LIST=$(get_all_categories)
-if echo "$CATEGORIES_LIST" | grep -qw "$ARG1"; then
-    if command -v fzf >/dev/null 2>&1; then
-        interactive_fzf "$ARG1"
-    else
-        interactive_menu "$ARG1"
-    fi
-    exit 0
-fi
-
-# 6. Если передан одиночный скрипт, ищем его в любой категории
-MATCHING_SCRIPTS=()
-while IFS= read -r entry; do
-    [[ -z "$entry" ]] && continue
-    IFS=':' read -r c m _ <<< "$entry"
-    if [[ "$m" == "$ARG1" ]]; then
-        MATCHING_SCRIPTS+=("$c:$m")
-    fi
-done < <(get_all_scripts)
-
-if [[ ${#MATCHING_SCRIPTS[@]} -eq 1 ]]; then
-    IFS=':' read -r c m <<< "${MATCHING_SCRIPTS[0]}"
-    shift
-    execute_command "$c" "$m" "$@"
-elif [[ ${#MATCHING_SCRIPTS[@]} -gt 1 ]]; then
-    log_warn "Найдено несколько команд с именем '$ARG1':"
-    for match in "${MATCHING_SCRIPTS[@]}"; do
-        echo "  - dev ${match/:/ }"
-    done
-    echo "Пожалуйста, уточните категорию."
-    exit 1
-fi
-
-log_error "Неизвестная команда или категория: '$ARG1'"
-echo "Запустите 'dev list' для просмотра всех доступных команд или 'dev --help'."
-exit 1
+die "Неизвестная команда: $*  (dev list — все команды, dev new — создать)"
